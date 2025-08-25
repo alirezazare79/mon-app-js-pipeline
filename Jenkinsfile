@@ -7,18 +7,17 @@ pipeline {
     BUILD_DIR     = 'dist'
     ARTIFACT_DIR  = 'artifacts'
 
-    // ✅ Dossiers écrivables par 'jenkins'
+    // ✅ chemins écrivable par l'user "jenkins"
     STAGING_DIR   = '/var/jenkins_home/deploy/staging/mon-app'
     PROD_DIR      = '/var/jenkins_home/deploy/prod/mon-app'
 
     JEST_JUNIT_OUTPUT = 'reports/junit/jest-results.xml'
-    STAGING_URL   = ''   // ex: http://staging.local/health
-    PROD_URL      = ''   // ex: http://prod.local/health
+    STAGING_URL   = ''
+    PROD_URL      = ''
     CURRENT_BRANCH = ''
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         echo 'Récupération du code source...'
@@ -29,19 +28,15 @@ pipeline {
     stage('Detect Branch') {
       steps {
         script {
-          // Essaie BRANCH_NAME/GIT_BRANCH, sinon détecte via références distantes pointant sur HEAD
+          // 1) Vars Jenkins si dispo
           def br = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//,'')
+          // 2) Branche exacte pointant sur HEAD
           if (!br?.trim() || br == 'HEAD') {
-            br = sh(
-              script: "git for-each-ref --format='%(refname:short)' --points-at HEAD refs/remotes | sed -n 's#^origin/##p' | head -n1",
-              returnStdout: true
-            ).trim()
+            br = sh(script: "git for-each-ref --format='%(refname:short)' --points-at HEAD refs/remotes | head -n1 | sed 's#^origin/##'", returnStdout: true).trim()
           }
+          // 3) Fallback: dev/master/main si présents
           if (!br?.trim()) {
-            br = sh(
-              script: "git branch -r --contains HEAD | sed -n 's# *origin/##p' | head -n1",
-              returnStdout: true
-            ).trim()
+            br = sh(script: "(git rev-parse --verify --quiet origin/develop >/dev/null && echo develop) || (git rev-parse --verify --quiet origin/master >/dev/null && echo master) || (git rev-parse --verify --quiet origin/main >/dev/null && echo main) || echo ''", returnStdout: true).trim()
           }
           env.CURRENT_BRANCH = br ?: ''
           echo ">> Branche détectée: ${env.CURRENT_BRANCH ?: 'inconnue'}"
@@ -111,9 +106,8 @@ pipeline {
       }
     }
 
-    /* -------- STAGING (develop) -------- */
+    /* ---------- STAGING ---------- */
     stage('Deploy to Staging') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         echo 'Déploiement vers STAGING…'
         sh '''
@@ -121,14 +115,13 @@ pipeline {
           ARTIFACT="${APP_NAME}-${BUILD_NUMBER}.tar.gz"
           mkdir -p "$STAGING_DIR"
           tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$STAGING_DIR"
-          ls -la "$STAGING_DIR" || true
+          ls -la "$STAGING_DIR" | head -n 20 || true
         '''
         echo 'Staging: déploiement terminé'
       }
     }
 
     stage('Health Check (Staging)') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         sh '''
           if [ -n "$STAGING_URL" ]; then
@@ -140,9 +133,8 @@ pipeline {
       }
     }
 
-    /* -------- PRODUCTION (master/main) -------- */
+    /* ---------- PRODUCTION ---------- */
     stage('Deploy to Production') {
-      when { expression { env.CURRENT_BRANCH in ['master','main'] } }
       steps {
         timeout(time: 10, unit: 'MINUTES') {
           input message: 'Confirmer le déploiement en PRODUCTION ?'
@@ -156,14 +148,13 @@ pipeline {
           fi
           mkdir -p "$PROD_DIR"
           tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$PROD_DIR"
-          ls -la "$PROD_DIR" || true
+          ls -la "$PROD_DIR" | head -n 20 || true
         '''
         echo 'Production: déploiement terminé'
       }
     }
 
     stage('Health Check (Production)') {
-      when { expression { env.CURRENT_BRANCH in ['master','main'] } }
       steps {
         sh '''
           if [ -n "$PROD_URL" ]; then
