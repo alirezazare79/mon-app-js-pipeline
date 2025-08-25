@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   tools {
-    nodejs 'Node18'   // ==> correspond EXACTEMENT au Name configuré
+    nodejs 'NodeJS-18'   // ==> correspond EXACTEMENT au Name configuré
   }
 
   environment {
