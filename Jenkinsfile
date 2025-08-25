@@ -1,6 +1,6 @@
 pipeline {
   agent any
-  tools { nodejs 'NodeJS-18' }   // doit correspondre au nom configuré dans NodeJS Tools
+  tools { nodejs 'NodeJS-18' }
 
   environment {
     APP_NAME      = 'mon-app-js'
@@ -9,16 +9,12 @@ pipeline {
     STAGING_DIR   = '/var/www/staging/mon-app'
     PROD_DIR      = '/var/www/html/mon-app'
     JEST_JUNIT_OUTPUT = 'reports/junit/jest-results.xml'
-    // Optionnels (laisser vide si pas de check HTTP)
     STAGING_URL   = ''
     PROD_URL      = ''
-    // Sera rempli dynamiquement :
     CURRENT_BRANCH = ''
-    ARTIFACT       = ''
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         echo 'Récupération du code source...'
@@ -29,22 +25,13 @@ pipeline {
     stage('Detect Branch') {
       steps {
         script {
-          def br = (env.BRANCH_NAME ?: env.GIT_BRANCH)
-          if (br) { br = br.replaceFirst(/^origin\//,'') }
-          if (!br?.trim()) {
-            br = sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+          // essaie BRANCH_NAME/GIT_BRANCH, sinon retrouve la branche contenant HEAD côté remote
+          def br = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//,'')
+          if (!br?.trim() || br == 'HEAD') {
+            br = sh(script: "git for-each-ref --format='%(refname:short)' --contains HEAD refs/remotes/origin | head -n1 | sed 's#^origin/##'", returnStdout: true).trim()
           }
-          env.CURRENT_BRANCH = br
-          echo ">> Branche détectée: ${env.CURRENT_BRANCH}"
-        }
-      }
-    }
-
-    stage('Prepare Vars') {
-      steps {
-        script {
-          env.ARTIFACT = "${env.APP_NAME}-${env.BUILD_NUMBER}.tar.gz"
-          echo ">> Artefact: ${env.ARTIFACT}"
+          env.CURRENT_BRANCH = br ?: ''
+          echo ">> Branche détectée: ${env.CURRENT_BRANCH ?: 'inconnue'}"
         }
       }
     }
@@ -90,11 +77,13 @@ pipeline {
         sh '''
           set -e
           npm run build
-          mkdir -p "${ARTIFACT_DIR}"
-          tar -czf "${ARTIFACT_DIR}/${ARTIFACT}" -C "${BUILD_DIR}" .
-          ls -la "${ARTIFACT_DIR}" || true
+          mkdir -p "$ARTIFACT_DIR"
+          ARTIFACT="${APP_NAME}-${BUILD_NUMBER}.tar.gz"
+          echo ">> Packaging $ARTIFACT"
+          tar -czf "$ARTIFACT_DIR/$ARTIFACT" -C "$BUILD_DIR" .
+          ls -la "$ARTIFACT_DIR" || true
         '''
-        archiveArtifacts artifacts: "${ARTIFACT_DIR}/${ARTIFACT}", fingerprint: true
+        archiveArtifacts artifacts: 'artifacts/*.tar.gz', fingerprint: true
       }
     }
 
@@ -115,8 +104,9 @@ pipeline {
         echo 'Déploiement vers STAGING…'
         sh '''
           set -e
-          mkdir -p "${STAGING_DIR}"
-          tar -xzf "${ARTIFACT_DIR}/${ARTIFACT}" -C "${STAGING_DIR}"
+          ARTIFACT="${APP_NAME}-${BUILD_NUMBER}.tar.gz"
+          mkdir -p "$STAGING_DIR"
+          tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$STAGING_DIR"
         '''
         echo 'Staging: déploiement terminé'
       }
@@ -125,7 +115,6 @@ pipeline {
     stage('Health Check (Staging)') {
       when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
-        echo 'Vérification de santé STAGING…'
         sh '''
           if [ -n "$STAGING_URL" ]; then
             command -v curl >/dev/null 2>&1 && curl -fsS "$STAGING_URL" >/dev/null && echo "OK" || echo "Healthcheck STAGING échoué/ignoré"
@@ -137,7 +126,7 @@ pipeline {
     }
 
     stage('Deploy to Production') {
-      when { expression { env.CURRENT_BRANCH == 'master' } }   // change en 'main' si besoin
+      when { expression { env.CURRENT_BRANCH == 'master' } }  // change en 'main' si besoin
       steps {
         timeout(time: 10, unit: 'MINUTES') {
           input message: 'Confirmer le déploiement en PRODUCTION ?'
@@ -145,11 +134,12 @@ pipeline {
         echo 'Déploiement vers PRODUCTION…'
         sh '''
           set -e
+          ARTIFACT="${APP_NAME}-${BUILD_NUMBER}.tar.gz"
           if [ -d "$PROD_DIR" ]; then
             cp -r "$PROD_DIR" "${PROD_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
           fi
           mkdir -p "$PROD_DIR"
-          tar -xzf "${ARTIFACT_DIR}/${ARTIFACT}" -C "$PROD_DIR"
+          tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$PROD_DIR"
           ls -la "$PROD_DIR" || true
         '''
         echo 'Production: déploiement terminé'
@@ -157,9 +147,8 @@ pipeline {
     }
 
     stage('Health Check (Production)') {
-      when { expression { env.CURRENT_BRANCH == 'master' } }   // change en 'main' si besoin
+      when { expression { env.CURRENT_BRANCH == 'master' } }  // change en 'main' si besoin
       steps {
-        echo 'Vérification de santé PRODUCTION…'
         sh '''
           if [ -n "$PROD_URL" ]; then
             command -v curl >/dev/null 2>&1 && curl -fsS "$PROD_URL" >/dev/null && echo "OK" || echo "Healthcheck PROD échoué/ignoré"
