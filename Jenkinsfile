@@ -2,19 +2,30 @@ pipeline {
   agent any
   tools { nodejs 'NodeJS-18' }
 
+  parameters {
+    choice(
+      name: 'DEPLOY_TARGET',
+      choices: ['auto', 'staging', 'production', 'none'],
+      description: 'Override déploiement: auto = develop→staging, master/main→production'
+    )
+  }
+
   environment {
     APP_NAME      = 'mon-app-js'
     BUILD_DIR     = 'dist'
     ARTIFACT_DIR  = 'artifacts'
     STAGING_DIR   = '/var/www/staging/mon-app'
     PROD_DIR      = '/var/www/html/mon-app'
+    STAGING_URL   = ''   // ex: http://staging.host/health
+    PROD_URL      = ''   // ex: http://prod.host/health
     JEST_JUNIT_OUTPUT = 'reports/junit/jest-results.xml'
-    STAGING_URL   = ''
-    PROD_URL      = ''
+
     CURRENT_BRANCH = ''
+    RESOLVED_TARGET = ''   // staging | production | none
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         echo 'Récupération du code source...'
@@ -25,13 +36,43 @@ pipeline {
     stage('Detect Branch') {
       steps {
         script {
-          // essaie BRANCH_NAME/GIT_BRANCH, sinon retrouve la branche contenant HEAD côté remote
-          def br = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//,'')
+          // Essaie les env Jenkins (multibranch), sinon détecte côté Git
+          def br = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//, '')
           if (!br?.trim() || br == 'HEAD') {
-            br = sh(script: "git for-each-ref --format='%(refname:short)' --contains HEAD refs/remotes/origin | head -n1 | sed 's#^origin/##'", returnStdout: true).trim()
+            // Cherche la 1ère branche distante pointant exactement sur HEAD
+            br = sh(
+              script: "git for-each-ref --format='%(refname:short)' --points-at HEAD refs/remotes | head -n1 | sed 's#^origin/##'",
+              returnStdout: true
+            ).trim()
+          }
+          // Fallback ultime: si on trouve origin/master ou origin/main
+          if (!br?.trim()) {
+            br = sh(
+              script: "(git rev-parse --verify --quiet origin/master >/dev/null && echo master) || (git rev-parse --verify --quiet origin/main >/dev/null && echo main) || echo ''",
+              returnStdout: true
+            ).trim()
           }
           env.CURRENT_BRANCH = br ?: ''
           echo ">> Branche détectée: ${env.CURRENT_BRANCH ?: 'inconnue'}"
+        }
+      }
+    }
+
+    stage('Decide Deploy Target') {
+      steps {
+        script {
+          def target = params.DEPLOY_TARGET ?: 'auto'
+          if (target == 'auto') {
+            if (env.CURRENT_BRANCH == 'develop') {
+              target = 'staging'
+            } else if (env.CURRENT_BRANCH in ['master','main']) {
+              target = 'production'
+            } else {
+              target = 'none'
+            }
+          }
+          env.RESOLVED_TARGET = target
+          echo ">> DEPLOY_TARGET=${params.DEPLOY_TARGET} → Résolu: ${env.RESOLVED_TARGET}"
         }
       }
     }
@@ -98,8 +139,9 @@ pipeline {
       }
     }
 
+    /************** STAGING **************/
     stage('Deploy to Staging') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
+      when { expression { env.RESOLVED_TARGET == 'staging' } }
       steps {
         echo 'Déploiement vers STAGING…'
         sh '''
@@ -113,7 +155,7 @@ pipeline {
     }
 
     stage('Health Check (Staging)') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
+      when { expression { env.RESOLVED_TARGET == 'staging' } }
       steps {
         sh '''
           if [ -n "$STAGING_URL" ]; then
@@ -125,8 +167,9 @@ pipeline {
       }
     }
 
+    /************** PRODUCTION **************/
     stage('Deploy to Production') {
-      when { expression { env.CURRENT_BRANCH == 'master' } }  // change en 'main' si besoin
+      when { expression { env.RESOLVED_TARGET == 'production' } }
       steps {
         timeout(time: 10, unit: 'MINUTES') {
           input message: 'Confirmer le déploiement en PRODUCTION ?'
@@ -147,7 +190,7 @@ pipeline {
     }
 
     stage('Health Check (Production)') {
-      when { expression { env.CURRENT_BRANCH == 'master' } }  // change en 'main' si besoin
+      when { expression { env.RESOLVED_TARGET == 'production' } }
       steps {
         sh '''
           if [ -n "$PROD_URL" ]; then
