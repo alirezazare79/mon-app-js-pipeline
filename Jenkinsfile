@@ -99,7 +99,6 @@ pipeline {
     }
 
     stage('Deploy to Staging') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         echo 'Déploiement vers STAGING…'
         sh '''
@@ -113,7 +112,6 @@ pipeline {
     }
 
     stage('Health Check (Staging)') {
-      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         sh '''
           if [ -n "$STAGING_URL" ]; then
@@ -126,7 +124,6 @@ pipeline {
     }
 
     stage('Deploy to Production') {
-      when { expression { env.CURRENT_BRANCH == 'master' } }  
       steps {
         timeout(time: 10, unit: 'MINUTES') {
           input message: 'Confirmer le déploiement en PRODUCTION ?'
@@ -147,7 +144,6 @@ pipeline {
     }
 
     stage('Health Check (Production)') {
-      when { expression { env.CURRENT_BRANCH == 'master' } } 
       steps {
         sh '''
           if [ -n "$PROD_URL" ]; then
