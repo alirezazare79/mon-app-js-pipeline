@@ -1,0 +1,17 @@
+{
+  "name": "mon-app-js",
+  "version": "1.0.0",
+  "description": "Application JavaScript pour TP Jenkins",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "jest",
+    "build": "npm run copy-files",
+    "copy-files": "mkdir -p dist && cp -r src/* dist/",
+    "clean": "rm -rf dist node_modules"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "express": "^4.18.0"
+  }
+}
