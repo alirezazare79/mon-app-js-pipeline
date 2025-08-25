@@ -118,14 +118,15 @@ pipeline {
         }
         echo 'Déploiement vers PRODUCTION…'
         sh """
-          set -e
-          if [ -d "${PROD_DIR}" ]; then
-            cp -r "${PROD_DIR}" "${PROD_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
-          fi
-          mkdir -p "${PROD_DIR}"
-          tar -xzf ${ARTIFACT_DIR}/${ARTIFACT} -C "${PROD_DIR}"
-          ls -la "${PROD_DIR}" || true
-        """
+         set -e
+              if [ -d "${PROD_DIR}" ]; then
+    cp -r "${PROD_DIR}" "${PROD_DIR}_backup_${'$'}(date +%Y%m%d_%H%M%S)"
+  fi
+  mkdir -p "${PROD_DIR}"
+  tar -xzf ${ARTIFACT_DIR}/${ARTIFACT} -C "${PROD_DIR}"
+  ls -la "${PROD_DIR}" || true
+"""
+
         echo 'Production: déploiement terminé'
       }
     }
