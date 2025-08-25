@@ -49,3 +49,14 @@ function updateTimestamp() {
         timestampElement.textContent = new Date().toLocaleString('fr-FR');
     }
 }
+// Nouvelle fonction utilitaire : puissance
+function powerNumbers(a, b) {
+  a = Number(a); b = Number(b);
+  if (Number.isNaN(a) || Number.isNaN(b)) return NaN;
+  return a ** b;
+}
+
+// Expose-la pour les tests Node si tu utilises module.exports:
+if (typeof module !== 'undefined') {
+  module.exports = { powerNumbers };
+}
