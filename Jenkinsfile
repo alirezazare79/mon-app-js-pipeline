@@ -144,7 +144,6 @@ pipeline {
     }
 
     stage('Health Check (Production)') {
-      when { expression { env.CURRENT_BRANCH == 'master' } } 
       steps {
         sh '''
           if [ -n "$PROD_URL" ]; then
