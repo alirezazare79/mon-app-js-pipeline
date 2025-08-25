@@ -2,13 +2,24 @@ pipeline {
   agent any
 
   tools {
-    nodejs 'NodeJS-18'   // ==> correspond EXACTEMENT au Name configuré
+    nodejs 'NodeJS-18'    // doit correspondre EXACTEMENT au nom configuré dans NodeJS tools
   }
 
   environment {
-    APP_NAME   = 'mon-app-js'
-    DEPLOY_DIR = '/var/www/html/mon-app'
-    // Pour le rapport JUnit de Jest :
+    APP_NAME     = 'mon-app-js'
+    BUILD_DIR    = 'dist'
+    ARTIFACT_DIR = 'artifacts'
+    ARTIFACT     = "${APP_NAME}-${env.BUILD_NUMBER}.tar.gz"
+
+    // Dossiers de déploiement (local au nœud où tourne Jenkins)
+    STAGING_DIR  = '/var/www/staging/mon-app'
+    PROD_DIR     = '/var/www/html/mon-app'
+
+    // (Optionnel) URLs pour healthcheck si accessibles depuis Jenkins
+    // STAGING_URL = 'http://staging.example.com/health'
+    // PROD_URL    = 'http://prod.example.com/health'
+
+    // JUnit Jest
     JEST_JUNIT_OUTPUT = 'reports/junit/jest-results.xml'
   }
 
@@ -24,13 +35,10 @@ pipeline {
       steps {
         echo 'Installation des dépendances Node.js...'
         sh '''
-          node --version
-          npm --version
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
+          set -e
+          node -v
+          npm -v
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
         '''
       }
     }
@@ -42,7 +50,6 @@ pipeline {
       }
       post {
         always {
-          // Remplace publishTestResults par le step standard :
           junit allowEmptyResults: true, testResults: 'reports/junit/*.xml'
         }
       }
@@ -52,27 +59,30 @@ pipeline {
       steps {
         echo 'Vérification de la qualité du code...'
         sh '''
-          echo "Vérification de la syntaxe JavaScript..."
+          echo "Vérification de la syntaxe JavaScript…"
           find src -name "*.js" -print0 | xargs -0 -I{} node --check {}
-          echo "Vérification terminée"
+          echo "OK"
         '''
       }
     }
 
     stage('Build') {
       steps {
-        echo 'Construction de l\'application...'
+        echo 'Construction de l’application...'
         sh '''
+          set -e
           npm run build
-          ls -la dist/ || true
+          mkdir -p ${ARTIFACT_DIR}
+          tar -czf ${ARTIFACT_DIR}/${ARTIFACT} -C ${BUILD_DIR} .
+          ls -la ${ARTIFACT_DIR} || true
         '''
-        archiveArtifacts artifacts: 'dist/**', fingerprint: true, allowEmptyArchive: true
+        archiveArtifacts artifacts: "${ARTIFACT_DIR}/${ARTIFACT}", fingerprint: true
       }
     }
 
     stage('Security Scan') {
       steps {
-        echo 'Analyse de sécurité...'
+        echo 'Analyse de sécurité…'
         sh '''
           mkdir -p reports
           npm audit --audit-level=high > reports/npm-audit.txt || true
@@ -81,104 +91,105 @@ pipeline {
       }
     }
 
-    // Ajuste les branches à ta réalité : tes logs montrent "master"
     stage('Deploy to Staging') {
-      when { branch 'develop' } // laisse si tu as bien une branche develop
+      when { branch 'develop' }
       steps {
-        echo 'Déploiement vers l\'environnement de staging...'
+        echo 'Déploiement vers STAGING…'
         sh '''
-          echo "Déploiement staging simulé"
-          mkdir -p staging
-          cp -r dist/* staging/ || true
+          set -e
+          mkdir -p "${STAGING_DIR}"
+          # Option locale : décompression du paquet
+          tar -xzf ${ARTIFACT_DIR}/${ARTIFACT} -C "${STAGING_DIR}"
+
+          # --- Exemple serveur distant (remplacer par vos cibles/clé) ---
+          # withCredentials([sshUserPrivateKey(credentialsId: 'ssh-prod', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          #   sh '''
+          #     rsync -avz -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" ${ARTIFACT_DIR}/${ARTIFACT} ${SSH_USER}@staging-host:/tmp/
+          #     ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@staging-host "mkdir -p ${STAGING_DIR} && tar -xzf /tmp/${ARTIFACT} -C ${STAGING_DIR}"
+          #   '''
+          # }
+        '''
+        echo 'Staging: déploiement terminé'
+      }
+    }
+
+    stage('Health Check (Staging)') {
+      when { branch 'develop' }
+      steps {
+        echo 'Vérification de santé STAGING…'
+        sh '''
+          if [ -n "${STAGING_URL}" ]; then
+            command -v curl >/dev/null 2>&1 && curl -fsS "${STAGING_URL}" >/dev/null && echo "OK" || echo "Healthcheck STAGING ignoré"
+          else
+            echo "Aucune URL STAGING définie, check ignoré"
+          fi
         '''
       }
     }
 
     stage('Deploy to Production') {
-      when { branch 'master' } // <= ton repo actuel
+      when { branch 'master' }
       steps {
-        echo 'Déploiement vers la production...'
+        // Garde-fou manuel (timeout 10 min)
+        timeout(time: 10, unit: 'MINUTES') {
+          input message: 'Confirmer le déploiement en PRODUCTION ?'
+        }
+
+        echo 'Déploiement vers PRODUCTION…'
         sh '''
-          echo "Sauvegarde de la version précédente..."
-          if [ -d "${DEPLOY_DIR}" ]; then
-            cp -r ${DEPLOY_DIR} ${DEPLOY_DIR}_backup_$(date +%Y%m%d_%H%M%S)
+          set -e
+          # Sauvegarde
+          if [ -d "${PROD_DIR}" ]; then
+            cp -r "${PROD_DIR}" "${PROD_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
           fi
 
-          echo "Déploiement de la nouvelle version..."
-          mkdir -p ${DEPLOY_DIR}
-          cp -r dist/* ${DEPLOY_DIR}/ || true
+          # Déploiement
+          mkdir -p "${PROD_DIR}"
+          tar -xzf ${ARTIFACT_DIR}/${ARTIFACT} -C "${PROD_DIR}"
 
-          echo "Vérification du déploiement..."
-          ls -la ${DEPLOY_DIR} || true
+          # --- Exemple serveur distant (remplacer par vos cibles/clé) ---
+          # withCredentials([sshUserPrivateKey(credentialsId: 'ssh-prod', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          #   sh '''
+          #     rsync -avz -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" ${ARTIFACT_DIR}/${ARTIFACT} ${SSH_USER}@prod-host:/tmp/
+          #     ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@prod-host "mkdir -p ${PROD_DIR} && tar -xzf /tmp/${ARTIFACT} -C ${PROD_DIR}"
+          #   '''
+          # }
         '''
+        sh 'ls -la "${PROD_DIR}" || true'
+        echo 'Production: déploiement terminé'
       }
     }
 
-    stage('Health Check') {
+    stage('Health Check (Production)') {
+      when { branch 'master' }
       steps {
-        echo 'Vérification de santé de l\'application...'
-        script {
-          try {
-            sh '''
-              echo "Test de connectivité..."
-              # Simulation d'un health check
-              echo "Application déployée avec succès"
-            '''
-          } catch (Exception e) {
-            currentBuild.result = 'UNSTABLE'
-            echo "Warning: Health check failed: ${e.getMessage()}"
-          }
-        }
+        echo 'Vérification de santé PRODUCTION…'
+        sh '''
+          if [ -n "${PROD_URL}" ]; then
+            command -v curl >/dev/null 2>&1 && curl -fsS "${PROD_URL}" >/dev/null && echo "OK" || echo "Healthcheck PROD ignoré"
+          else
+            echo "Aucune URL PROD définie, check ignoré"
+          fi
+        '''
       }
     }
   }
 
   post {
     always {
-      echo 'Nettoyage des ressources temporaires...'
+      echo 'Nettoyage…'
       sh '''
         rm -rf node_modules/.cache || true
-        rm -rf staging || true
       '''
     }
     success {
       echo 'Pipeline exécuté avec succès!'
-      script {
-        def toAddr = (env.CHANGE_AUTHOR_EMAIL ?: '').trim()
-        if (toAddr) {
-          emailext (
-            subject: "Build Success: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-            body: """Le déploiement de ${env.JOB_NAME} s'est terminé avec succès.
-Build: ${env.BUILD_NUMBER}
-Branch: ${env.BRANCH_NAME}
-Voir les détails: ${env.BUILD_URL}""",
-            to: toAddr
-          )
-        } else {
-          echo 'Aucun CHANGE_AUTHOR_EMAIL -> aucun email envoyé.'
-        }
-      }
     }
     failure {
       echo 'Le pipeline a échoué!'
-      script {
-        def toAddr = (env.CHANGE_AUTHOR_EMAIL ?: '').trim()
-        if (toAddr) {
-          emailext (
-            subject: "Build Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-            body: """Le déploiement de ${env.JOB_NAME} a échoué.
-Build: ${env.BUILD_NUMBER}
-Branch: ${env.BRANCH_NAME}
-Voir les détails: ${env.BUILD_URL}""",
-            to: toAddr
-          )
-        } else {
-          echo 'Aucun CHANGE_AUTHOR_EMAIL -> aucun email envoyé.'
-        }
-      }
     }
     unstable {
-      echo 'Build instable - des avertissements ont été détectés'
+      echo 'Build instable - avertissements détectés'
     }
   }
 }
