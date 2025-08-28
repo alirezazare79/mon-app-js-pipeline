@@ -7,14 +7,19 @@ pipeline {
     BUILD_DIR     = 'dist'
     ARTIFACT_DIR  = 'artifacts'
 
-    // ✅ chemins écrivable par l'user "jenkins"
-    STAGING_DIR   = '/var/jenkins_home/deploy/staging/mon-app'
-    PROD_DIR      = '/var/jenkins_home/deploy/prod/mon-app'
+    // ⚠️ Si /var/www n'est pas accessible: remplace par /var/jenkins_home/deploy/...
+    STAGING_DIR   = '/var/www/staging/mon-app'
+    PROD_DIR      = '/var/www/html/mon-app'
 
     JEST_JUNIT_OUTPUT = 'reports/junit/jest-results.xml'
     STAGING_URL   = ''
     PROD_URL      = ''
     CURRENT_BRANCH = ''
+
+    // Slack (à adapter)
+    SLACK_TEAM    = 'votre-workspace'          // ex: mycompany
+    SLACK_CHANNEL = '#ci'                      // ex: #ci
+    SLACK_TOKEN_ID = 'slack-bot-token'         // ID du credential Jenkins (Secret text)
   }
 
   stages {
@@ -28,15 +33,18 @@ pipeline {
     stage('Detect Branch') {
       steps {
         script {
-          // 1) Vars Jenkins si dispo
           def br = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//,'')
-          // 2) Branche exacte pointant sur HEAD
           if (!br?.trim() || br == 'HEAD') {
-            br = sh(script: "git for-each-ref --format='%(refname:short)' --points-at HEAD refs/remotes | head -n1 | sed 's#^origin/##'", returnStdout: true).trim()
+            br = sh(
+              script: "git for-each-ref --format='%(refname:short)' --points-at HEAD refs/remotes | sed -n 's#^origin/##p' | head -n1",
+              returnStdout: true
+            ).trim()
           }
-          // 3) Fallback: dev/master/main si présents
           if (!br?.trim()) {
-            br = sh(script: "(git rev-parse --verify --quiet origin/develop >/dev/null && echo develop) || (git rev-parse --verify --quiet origin/master >/dev/null && echo master) || (git rev-parse --verify --quiet origin/main >/dev/null && echo main) || echo ''", returnStdout: true).trim()
+            br = sh(
+              script: "git branch -r --contains HEAD | sed -n 's# *origin/##p' | head -n1",
+              returnStdout: true
+            ).trim()
           }
           env.CURRENT_BRANCH = br ?: ''
           echo ">> Branche détectée: ${env.CURRENT_BRANCH ?: 'inconnue'}"
@@ -58,13 +66,37 @@ pipeline {
 
     stage('Run Tests') {
       steps {
-        echo 'Exécution des tests...'
-        sh 'npm test -- --ci'
+        echo 'Exécution des tests + couverture...'
+        sh 'npm test -- --ci --coverage'
       }
       post {
         always {
           junit allowEmptyResults: true, testResults: 'reports/junit/*.xml'
         }
+      }
+    }
+
+    stage('Publish Coverage') {
+      steps {
+        echo 'Publication de la couverture...'
+        // Nécessite Code Coverage API plugin
+        publishCoverage(
+          adapters: [coberturaAdapter('coverage/cobertura-coverage.xml')],
+          sourceFileResolver: sourceFiles('STORE_LAST_BUILD'),
+          // Seuils Jenkins (en plus de jest.coverageThreshold)
+          failUnhealthy: true,
+          failUnstable: true,
+          healthyTarget:    [lineCoverage: 80, conditionalCoverage: 70],
+          unhealthyTarget:  [lineCoverage: 50, conditionalCoverage: 40]
+        )
+        // Lien HTML (si plugin HTML Publisher installé)
+        publishHTML(target: [
+          reportDir: 'coverage/lcov-report',
+          reportFiles: 'index.html',
+          reportName: 'Coverage Report',
+          keepAll: true,
+          alwaysLinkToLastBuild: true
+        ])
       }
     }
 
@@ -91,7 +123,10 @@ pipeline {
           tar -czf "$ARTIFACT_DIR/$ARTIFACT" -C "$BUILD_DIR" .
           ls -la "$ARTIFACT_DIR" || true
         '''
-        archiveArtifacts artifacts: 'artifacts/*.tar.gz', fingerprint: true
+        // 🔒 Archivage du paquet et du build
+        archiveArtifacts artifacts: 'artifacts/*.tar.gz, dist/**', fingerprint: true, allowEmptyArchive: true
+        // 🔒 Archivage des rapports de couverture
+        archiveArtifacts artifacts: 'coverage/**', fingerprint: false, allowEmptyArchive: true
       }
     }
 
@@ -106,8 +141,9 @@ pipeline {
       }
     }
 
-    /* ---------- STAGING ---------- */
+    /* -------- STAGING (develop) -------- */
     stage('Deploy to Staging') {
+      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         echo 'Déploiement vers STAGING…'
         sh '''
@@ -115,13 +151,14 @@ pipeline {
           ARTIFACT="${APP_NAME}-${BUILD_NUMBER}.tar.gz"
           mkdir -p "$STAGING_DIR"
           tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$STAGING_DIR"
-          ls -la "$STAGING_DIR" | head -n 20 || true
+          ls -la "$STAGING_DIR" || true
         '''
         echo 'Staging: déploiement terminé'
       }
     }
 
     stage('Health Check (Staging)') {
+      when { expression { env.CURRENT_BRANCH == 'develop' } }
       steps {
         sh '''
           if [ -n "$STAGING_URL" ]; then
@@ -133,8 +170,9 @@ pipeline {
       }
     }
 
-    /* ---------- PRODUCTION ---------- */
+    /* -------- PRODUCTION (master/main) -------- */
     stage('Deploy to Production') {
+      when { expression { env.CURRENT_BRANCH in ['master','main'] } }
       steps {
         timeout(time: 10, unit: 'MINUTES') {
           input message: 'Confirmer le déploiement en PRODUCTION ?'
@@ -148,13 +186,14 @@ pipeline {
           fi
           mkdir -p "$PROD_DIR"
           tar -xzf "$ARTIFACT_DIR/$ARTIFACT" -C "$PROD_DIR"
-          ls -la "$PROD_DIR" | head -n 20 || true
+          ls -la "$PROD_DIR" || true
         '''
         echo 'Production: déploiement terminé'
       }
     }
 
     stage('Health Check (Production)') {
+      when { expression { env.CURRENT_BRANCH in ['master','main'] } }
       steps {
         sh '''
           if [ -n "$PROD_URL" ]; then
@@ -171,9 +210,41 @@ pipeline {
     always {
       echo 'Nettoyage…'
       sh 'rm -rf node_modules/.cache || true'
+      script {
+        // 🔔 Slack générique (ne casse pas le build si non configuré)
+        try {
+          slackSend teamDomain: env.SLACK_TEAM, tokenCredentialId: env.SLACK_TOKEN_ID,
+                    channel: env.SLACK_CHANNEL, color: '#AAAAAA',
+                    message: "ℹ️ ${env.JOB_NAME} #${env.BUILD_NUMBER} terminé avec statut: ${currentBuild.currentResult} (${env.CURRENT_BRANCH}) — ${env.BUILD_URL}"
+        } catch (e) { echo "Slack non configuré: ${e.message}" }
+      }
     }
-    success { echo 'Pipeline exécuté avec succès!' }
-    failure { echo 'Le pipeline a échoué!' }
-    unstable { echo 'Build instable - avertissements détectés' }
+    success {
+      script {
+        try {
+          slackSend teamDomain: env.SLACK_TEAM, tokenCredentialId: env.SLACK_TOKEN_ID,
+                    channel: env.SLACK_CHANNEL, color: 'good',
+                    message: "✅ SUCCESS — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.CURRENT_BRANCH}) — ${env.BUILD_URL}"
+        } catch (e) { /* ignore */ }
+      }
+    }
+    unstable {
+      script {
+        try {
+          slackSend teamDomain: env.SLACK_TEAM, tokenCredentialId: env.SLACK_TOKEN_ID,
+                    channel: env.SLACK_CHANNEL, color: 'warning',
+                    message: "🟠 UNSTABLE — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.CURRENT_BRANCH}) — ${env.BUILD_URL}"
+        } catch (e) { /* ignore */ }
+      }
+    }
+    failure {
+      script {
+        try {
+          slackSend teamDomain: env.SLACK_TEAM, tokenCredentialId: env.SLACK_TOKEN_ID,
+                    channel: env.SLACK_CHANNEL, color: 'danger',
+                    message: "❌ FAILURE — ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.CURRENT_BRANCH}) — ${env.BUILD_URL}"
+        } catch (e) { /* ignore */ }
+      }
+    }
   }
 }

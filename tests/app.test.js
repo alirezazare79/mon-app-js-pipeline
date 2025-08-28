@@ -33,9 +33,14 @@ describe('Tests de la calculatrice', () => {
         expect(isValidNumber(NaN)).toBe(false);
         expect(isValidNumber(Infinity)).toBe(false);
     });
-    describe('demo failing test', () => {
-      test('2 + 3 devrait être 6 (faux exprès)', () => {
-    expect(addNumbers(2, 3)).toBe(6); // ❌ volontairement faux (2+3=5)
+//     describe('demo failing test', () => {
+//       test('2 + 3 devrait être 6 (faux exprès)', () => {
+//     expect(addNumbers(2, 3)).toBe(6); // ❌ volontairement faux (2+3=5)
+//   });
+// });
+describe('demo fixed test', () => {
+  test('2 + 3 = 5', () => {
+    expect(addNumbers(2, 3)).toBe(5); // ✅ corrigé
   });
 });
 });
